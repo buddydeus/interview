@@ -51,6 +51,17 @@ class _BrokenRecorder:
 
 
 class PipelineRegressionTests(unittest.TestCase):
+    def test_ask_recent_uses_configured_subtitle_count(self) -> None:
+        cfg = copy.deepcopy(DEFAULTS)
+        cfg["question"]["recent_count"] = 2
+        pipeline = Pipeline(cfg)
+        pipeline._recent.extend(["第一句", "第二句", "第三句", "第四句"])
+
+        with patch.object(pipeline, "ask") as ask:
+            pipeline.ask_recent()
+
+        ask.assert_called_once_with("第三句 第四句")
+
     def test_stop_keeps_answer_worker_available(self) -> None:
         pipeline = Pipeline(copy.deepcopy(DEFAULTS))
         answerer = _BlockingAnswerer()
@@ -180,17 +191,20 @@ class UiRegressionTests(unittest.TestCase):
 
     def test_hotkey_settings_are_editable(self) -> None:
         dialog = self._dialog()
+        self.assertEqual(dialog.sp_recent_count.value(), 3)
         self.assertEqual(dialog.ed_hotkey_answer.text(), "n")
         self.assertEqual(dialog.ed_hotkey_clear.text(), "m")
         self.assertEqual(dialog.ed_hotkey_talk.text(), "space")
         self.assertEqual(dialog.ed_hotkey_listen.text(), "b")
 
+        dialog.sp_recent_count.setValue(5)
         dialog.ed_hotkey_answer.setText("f6")
         dialog.ed_hotkey_clear.setText("f7")
         dialog.ed_hotkey_talk.setText("f8")
         dialog.ed_hotkey_listen.setText("f9")
         cfg = dialog.result_config()
 
+        self.assertEqual(cfg["question"]["recent_count"], 5)
         self.assertEqual(cfg["ui"]["hotkey_answer"], "f6")
         self.assertEqual(cfg["ui"]["hotkey_clear"], "f7")
         self.assertEqual(cfg["ui"]["hotkey_talk"], "f8")
@@ -288,6 +302,91 @@ class UiRegressionTests(unittest.TestCase):
 
         self.assertTrue(self._wait_until(called.is_set))
         self.assertEqual(callback_thread, [threading.get_ident()])
+        with patch("app.ui.cfgmod.save_ui_position"):
+            window.close()
+
+    def test_hotkeys_are_suspended_while_question_input_is_active(self) -> None:
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtTest import QTest
+
+        from app.ui import OverlayWindow
+
+        actions: list[str] = []
+
+        class ProbeWindow(OverlayWindow):
+            def _toggle_visible(self) -> None:
+                actions.append("toggle")
+
+            def _start_voice(self) -> bool:
+                actions.append("talk_start")
+                return True
+
+            def _stop_voice(self) -> None:
+                actions.append("talk_stop")
+
+            def _toggle_running(self) -> None:
+                actions.append("listen")
+
+            def _clear(self) -> None:
+                actions.append("clear")
+
+        with (
+            patch("app.ui.Pipeline.prewarm"),
+            patch.object(ProbeWindow, "_setup_hotkeys"),
+        ):
+            window = ProbeWindow(copy.deepcopy(DEFAULTS))
+
+        window.show()
+        window.activateWindow()
+        window.ed_ask.setFocus()
+        self.app.processEvents()
+        self.assertTrue(window._hotkeys_suspended())
+
+        with patch.object(
+            window.pipeline, "ask_recent", side_effect=lambda: actions.append("ask_recent")
+        ):
+            window._hotkey_toggle_requested.emit()
+            window._hotkey_answer_requested.emit()
+            window._hotkey_clear_requested.emit()
+            window._hotkey_talk_pressed.emit()
+            window._hotkey_talk_released.emit()
+            window._hotkey_listen_requested.emit()
+
+            self.assertEqual(actions, [])
+
+            QTest.keyClick(window.ed_ask, Qt.Key.Key_Escape)
+            self.app.processEvents()
+            self.assertFalse(window._hotkeys_suspended())
+
+            window._hotkey_toggle_requested.emit()
+            window._hotkey_answer_requested.emit()
+            window._hotkey_clear_requested.emit()
+            window._hotkey_talk_pressed.emit()
+            window._hotkey_talk_released.emit()
+            window._hotkey_listen_requested.emit()
+
+        self.assertEqual(
+            actions,
+            ["toggle", "ask_recent", "clear", "talk_start", "talk_stop", "listen"],
+        )
+        with patch("app.ui.cfgmod.save_ui_position"):
+            window.close()
+
+    def test_transcript_follows_delayed_scroll_range_changes(self) -> None:
+        from app.ui import OverlayWindow
+
+        with (
+            patch("app.ui.Pipeline.prewarm"),
+            patch.object(OverlayWindow, "_setup_hotkeys"),
+        ):
+            window = OverlayWindow(copy.deepcopy(DEFAULTS))
+
+        bar = window.scroll_transcript.verticalScrollBar()
+        bar.setRange(0, 50)
+        bar.setValue(0)
+        bar.setRange(0, 100)
+
+        self.assertEqual(bar.value(), bar.maximum())
         with patch("app.ui.cfgmod.save_ui_position"):
             window.close()
 

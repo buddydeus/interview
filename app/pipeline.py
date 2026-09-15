@@ -232,7 +232,8 @@ class Pipeline:
 
     def ask_recent(self) -> None:
         """把最近的实时字幕拼起来当问题，用于规则漏判时人工兜底。"""
-        text = " ".join(self._recent).strip()
+        count = max(1, int(self.cfg["question"].get("recent_count", 3)))
+        text = " ".join(list(self._recent)[-count:]).strip()
         if not text:
             self._emit(
                 {

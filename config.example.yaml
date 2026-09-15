@@ -60,6 +60,7 @@ question:
   min_chars: 5           # 短于此长度的句子不判定为问题
   threshold: 3.0         # 疑问句得分阈值，调高更保守（更少误触发）
   merge_gap_ms: 1200     # 两段话间隔小于此时长则合并成一句再判断
+  recent_count: 3        # 「问最近」拼接末尾几条字幕，可选 1-8
   auto_answer: true      # 自动识别到问题就生成回答；false 则只提示需手动触发
 
 llm:

@@ -12,7 +12,7 @@ import threading
 from string import Template
 
 from PyQt6.QtCore import Qt, QRect, QTimer, QPoint, pyqtSignal, pyqtSlot
-from PyQt6.QtGui import QFont, QGuiApplication, QTextCursor
+from PyQt6.QtGui import QFont, QGuiApplication, QKeySequence, QShortcut, QTextCursor
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -429,6 +429,10 @@ class SettingsDialog(QDialog):
         self.sp_threshold.setRange(0.0, 12.0)
         self.sp_threshold.setSingleStep(0.5)
         self.sp_threshold.setValue(float(qcfg.get("threshold", 3.0)))
+        self.sp_recent_count = QSpinBox()
+        self.sp_recent_count.setRange(1, 8)
+        self.sp_recent_count.setSuffix(" 条")
+        self.sp_recent_count.setValue(int(qcfg.get("recent_count", 3)))
         self.sp_silence = QSpinBox()
         self.sp_silence.setRange(200, 3000)
         self.sp_silence.setSingleStep(100)
@@ -449,6 +453,7 @@ class SettingsDialog(QDialog):
         form.addRow("麦克风（按住说话）", mic_row)
         form.addRow("", self.chk_auto)
         form.addRow("提问判定阈值", self.sp_threshold)
+        form.addRow("问最近字幕数", self.sp_recent_count)
         form.addRow("断句静音时长", self.sp_silence)
         return page
 
@@ -601,6 +606,7 @@ class SettingsDialog(QDialog):
         cfgmod.set_(self.cfg, "audio.mic_device", self.cb_mic.currentData() or "")
         cfgmod.set_(self.cfg, "question.auto_answer", self.chk_auto.isChecked())
         cfgmod.set_(self.cfg, "question.threshold", round(self.sp_threshold.value(), 1))
+        cfgmod.set_(self.cfg, "question.recent_count", self.sp_recent_count.value())
         cfgmod.set_(self.cfg, "audio.end_silence_ms", self.sp_silence.value())
 
         cfgmod.set_(self.cfg, "ui.theme", self.cb_theme.currentText())
@@ -637,12 +643,12 @@ class OverlayWindow(QWidget):
         super().__init__()
         self.cfg = cfg
         self.pipeline = Pipeline(cfg)
-        self._hotkey_toggle_requested.connect(self._toggle_visible)
+        self._hotkey_toggle_requested.connect(self._toggle_visible_from_hotkey)
         self._hotkey_answer_requested.connect(self._ask_recent_from_hotkey)
-        self._hotkey_clear_requested.connect(self._clear)
+        self._hotkey_clear_requested.connect(self._clear_from_hotkey)
         self._hotkey_talk_pressed.connect(self._start_voice_from_hotkey)
         self._hotkey_talk_released.connect(self._stop_voice_from_hotkey)
-        self._hotkey_listen_requested.connect(self._toggle_running)
+        self._hotkey_listen_requested.connect(self._toggle_running_from_hotkey)
         # 立刻在后台把大模型链路热起来（import openai + 建客户端 + 建连约 4 秒）。
         # 等用户点「开始监听」时通常已经热好了，第一次提问不再干等。
         self.pipeline.prewarm()
@@ -753,6 +759,9 @@ class OverlayWindow(QWidget):
         self.transcript_layout.addWidget(self.lbl_seg_hint)
         self.transcript_layout.addStretch(1)
         self.scroll_transcript.setWidget(self.transcript_host)
+        self.scroll_transcript.verticalScrollBar().rangeChanged.connect(
+            lambda _minimum, _maximum: self._scroll_transcript_to_bottom()
+        )
         lay.addWidget(self.scroll_transcript)
 
         # 提问
@@ -771,6 +780,11 @@ class OverlayWindow(QWidget):
         self.ed_ask.setClearButtonEnabled(True)
         self.ed_ask.setToolTip("在这里输入任意问题，回车或点「提问」直接发给大模型")
         self.ed_ask.returnPressed.connect(self._ask_typed)
+        self._ask_escape_shortcut = QShortcut(
+            QKeySequence(Qt.Key.Key_Escape), self.ed_ask
+        )
+        self._ask_escape_shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
+        self._ask_escape_shortcut.activated.connect(self.ed_ask.clearFocus)
         # 按住说话：和微信一样，按住录、松开就发。用麦克风（不是采集链路的
         # loopback），所以面试官的声音不会被录进来。
         self.btn_talk = QPushButton("按住说话", objectName="talk")
@@ -974,8 +988,6 @@ class OverlayWindow(QWidget):
         self._seg_rows.append((row, label, btn))
 
         self._trim_transcript_rows()
-        # 新的一句进来后滚到底，保证看得到最新内容
-        QTimer.singleShot(0, self._scroll_transcript_to_bottom)
 
     def _scroll_transcript_to_bottom(self) -> None:
         bar = self.scroll_transcript.verticalScrollBar()
@@ -1142,6 +1154,9 @@ class OverlayWindow(QWidget):
 
     # --- 全局热键 ---
 
+    def _hotkeys_suspended(self) -> bool:
+        return self.isActiveWindow() and self.ed_ask.hasFocus()
+
     def _setup_hotkeys(self) -> None:
         self._teardown_hotkeys()
         ui = self.cfg["ui"]
@@ -1223,6 +1238,8 @@ class OverlayWindow(QWidget):
 
     @pyqtSlot()
     def _start_voice_from_hotkey(self) -> None:
+        if self._hotkeys_suspended():
+            return
         if not self._voice_hotkey_started:
             self._voice_hotkey_started = self._start_voice()
 
@@ -1234,12 +1251,31 @@ class OverlayWindow(QWidget):
         self._stop_voice()
 
     @pyqtSlot()
+    def _toggle_visible_from_hotkey(self) -> None:
+        if self._hotkeys_suspended():
+            return
+        self._toggle_visible()
+
     def _toggle_visible(self) -> None:
         self.setVisible(not self.isVisible())
 
     @pyqtSlot()
     def _ask_recent_from_hotkey(self) -> None:
+        if self._hotkeys_suspended():
+            return
         self.pipeline.ask_recent()
+
+    @pyqtSlot()
+    def _clear_from_hotkey(self) -> None:
+        if self._hotkeys_suspended():
+            return
+        self._clear()
+
+    @pyqtSlot()
+    def _toggle_running_from_hotkey(self) -> None:
+        if self._hotkeys_suspended():
+            return
+        self._toggle_running()
 
 
 def run(cfg: dict) -> int:

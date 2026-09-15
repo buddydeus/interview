@@ -63,6 +63,7 @@ DEFAULTS: dict[str, Any] = {
         "min_chars": 5,
         "threshold": 3.0,
         "merge_gap_ms": 1200,
+        "recent_count": 3,
         "auto_answer": True,
     },
     "llm": {
