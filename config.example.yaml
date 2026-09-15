@@ -95,5 +95,6 @@ ui:
   hotkey_toggle: "ctrl+alt+h"  # 显示/隐藏
   hotkey_answer: "n"           # 单键：把最近字幕当问题提问；留空禁用
   hotkey_clear: "m"            # 单键：清空字幕和回答；留空禁用
+  hotkey_screenshot: "j"       # 单键：框选截图并自动提问；留空禁用
   hotkey_talk: "space"         # 单键：按住说话，松开结束；留空禁用
   hotkey_listen: "b"           # 单键：开始/停止监听；留空禁用

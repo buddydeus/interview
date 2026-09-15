@@ -245,6 +245,19 @@ class Pipeline:
             return
         self.ask(text)
 
+    def ask_image(self, image_url: str) -> None:
+        """把区域截图直接交给多模态模型，并立即生成回答。"""
+        if not image_url:
+            return
+        prompt = (
+            "这是我主动选择的截图，请直接读取并解答截图主体，不要判断它是否像问句。"
+            "如果包含多个问题，优先回答最完整、最靠下的问题；"
+            "如果是代码或图表，请结合截图中的具体内容作答。"
+        )
+        self._ensure_answer_worker()
+        self._emit({"type": "question", "text": "截图提问"})
+        self._put_latest(self._ask_q, (prompt, image_url))
+
     def clear_history(self) -> None:
         self._history = []
         self._recent.clear()
@@ -396,18 +409,27 @@ class Pipeline:
     def _answer_loop(self, stop: threading.Event) -> None:
         while not stop.is_set():
             try:
-                question = self._ask_q.get(timeout=0.3)
+                request = self._ask_q.get(timeout=0.3)
             except queue.Empty:
                 continue
             # 队列里已有更新的问题，直接丢掉这条
             if not self._ask_q.empty():
                 continue
 
+            if isinstance(request, tuple):
+                question, image_url = request
+            else:
+                question, image_url = request, ""
             self._emit({"type": "answer_start", "question": question})
             chunks: list[str] = []
             cancelled = False
             try:
-                for piece in self._answerer.stream(question, self._history):
+                stream = (
+                    self._answerer.stream(question, self._history, image_url=image_url)
+                    if image_url
+                    else self._answerer.stream(question, self._history)
+                )
+                for piece in stream:
                     if stop.is_set():
                         cancelled = True
                         break

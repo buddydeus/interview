@@ -99,6 +99,7 @@ DEFAULTS: dict[str, Any] = {
         "hotkey_toggle": "ctrl+alt+h",
         "hotkey_answer": "n",
         "hotkey_clear": "m",
+        "hotkey_screenshot": "j",
         "hotkey_talk": "space",
         "hotkey_listen": "b",
     },

@@ -5,6 +5,7 @@ import os
 import threading
 import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -14,6 +15,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt6.QtWidgets import QApplication
 
 from app.config import DEFAULTS
+from app.llm import Answerer
 from app.pipeline import Pipeline
 from app.voice_input import VoiceInput
 
@@ -50,7 +52,68 @@ class _BrokenRecorder:
         pass
 
 
+class _ImageAnswerer:
+    def __init__(self) -> None:
+        self.called = threading.Event()
+        self.request: tuple[str, str] | None = None
+
+    def stream(self, question: str, history=None, image_url: str = ""):
+        self.request = (question, image_url)
+        self.called.set()
+        yield "截图回答"
+
+    def cancel(self) -> None:
+        pass
+
+
+class LlmRegressionTests(unittest.TestCase):
+    def test_image_request_uses_openai_multimodal_content(self) -> None:
+        answerer = Answerer(copy.deepcopy(DEFAULTS))
+        completions = SimpleNamespace()
+        captured: dict = {}
+
+        def create(**kwargs):
+            captured.update(kwargs)
+            return []
+
+        completions.create = create
+        client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+
+        with patch.object(answerer, "_client_or_create", return_value=client):
+            self.assertEqual(
+                list(answerer.stream("回答截图", image_url="data:image/png;base64,AA==")),
+                [],
+            )
+
+        content = captured["messages"][-1]["content"]
+        system_prompt = captured["messages"][0]["content"]
+        self.assertIn("不再执行“是否构成明确问题”的判断", system_prompt)
+        self.assertIn("不得输出“（未识别到明确问题）”", system_prompt)
+        self.assertEqual(content[0], {"type": "text", "text": "回答截图"})
+        self.assertEqual(
+            content[1],
+            {
+                "type": "image_url",
+                "image_url": {"url": "data:image/png;base64,AA=="},
+            },
+        )
+
+
 class PipelineRegressionTests(unittest.TestCase):
+    def test_image_question_runs_through_answer_worker(self) -> None:
+        pipeline = Pipeline(copy.deepcopy(DEFAULTS))
+        answerer = _ImageAnswerer()
+        pipeline._answerer = answerer
+
+        pipeline.ask_image("data:image/png;base64,AA==")
+
+        self.assertTrue(answerer.called.wait(timeout=1.0))
+        self.assertIsNotNone(answerer.request)
+        self.assertIn("截图", answerer.request[0])
+        self.assertEqual(answerer.request[1], "data:image/png;base64,AA==")
+        self.assertIn("question", [event["type"] for event in pipeline.drain()])
+        pipeline.shutdown()
+
     def test_ask_recent_uses_configured_subtitle_count(self) -> None:
         cfg = copy.deepcopy(DEFAULTS)
         cfg["question"]["recent_count"] = 2
@@ -194,12 +257,14 @@ class UiRegressionTests(unittest.TestCase):
         self.assertEqual(dialog.sp_recent_count.value(), 3)
         self.assertEqual(dialog.ed_hotkey_answer.text(), "n")
         self.assertEqual(dialog.ed_hotkey_clear.text(), "m")
+        self.assertEqual(dialog.ed_hotkey_screenshot.text(), "j")
         self.assertEqual(dialog.ed_hotkey_talk.text(), "space")
         self.assertEqual(dialog.ed_hotkey_listen.text(), "b")
 
         dialog.sp_recent_count.setValue(5)
         dialog.ed_hotkey_answer.setText("f6")
         dialog.ed_hotkey_clear.setText("f7")
+        dialog.ed_hotkey_screenshot.setText("f5")
         dialog.ed_hotkey_talk.setText("f8")
         dialog.ed_hotkey_listen.setText("f9")
         cfg = dialog.result_config()
@@ -207,6 +272,7 @@ class UiRegressionTests(unittest.TestCase):
         self.assertEqual(cfg["question"]["recent_count"], 5)
         self.assertEqual(cfg["ui"]["hotkey_answer"], "f6")
         self.assertEqual(cfg["ui"]["hotkey_clear"], "f7")
+        self.assertEqual(cfg["ui"]["hotkey_screenshot"], "f5")
         self.assertEqual(cfg["ui"]["hotkey_talk"], "f8")
         self.assertEqual(cfg["ui"]["hotkey_listen"], "f9")
         dialog.close()
@@ -242,6 +308,9 @@ class UiRegressionTests(unittest.TestCase):
             def _clear(self) -> None:
                 actions.append(("clear", threading.get_ident()))
 
+            def _start_screenshot(self) -> None:
+                actions.append(("screenshot", threading.get_ident()))
+
         with (
             patch("app.ui.Pipeline.prewarm"),
             patch("keyboard.add_hotkey", return_value=object()),
@@ -263,18 +332,21 @@ class UiRegressionTests(unittest.TestCase):
                 callbacks["m"](KeyEvent("down"))
                 callbacks["m"](KeyEvent("down"))
                 callbacks["m"](KeyEvent("up"))
+                callbacks["j"](KeyEvent("down"))
+                callbacks["j"](KeyEvent("down"))
+                callbacks["j"](KeyEvent("up"))
 
             thread = threading.Thread(target=press_keys)
             thread.start()
             thread.join(timeout=1.0)
 
-            self.assertTrue(self._wait_until(lambda: len(actions) == 5))
+            self.assertTrue(self._wait_until(lambda: len(actions) == 6))
             self.assertEqual([name for name, _thread_id in actions], [
-                "talk_start", "talk_stop", "listen", "ask_recent", "clear"
+                "talk_start", "talk_stop", "listen", "ask_recent", "clear", "screenshot"
             ])
             self.assertEqual(
                 [thread_id for _name, thread_id in actions],
-                [threading.get_ident()] * 5,
+                [threading.get_ident()] * 6,
             )
             with patch("app.ui.cfgmod.save_ui_position"):
                 window.close()
@@ -330,6 +402,9 @@ class UiRegressionTests(unittest.TestCase):
             def _clear(self) -> None:
                 actions.append("clear")
 
+            def _start_screenshot(self) -> None:
+                actions.append("screenshot")
+
         with (
             patch("app.ui.Pipeline.prewarm"),
             patch.object(ProbeWindow, "_setup_hotkeys"),
@@ -348,6 +423,7 @@ class UiRegressionTests(unittest.TestCase):
             window._hotkey_toggle_requested.emit()
             window._hotkey_answer_requested.emit()
             window._hotkey_clear_requested.emit()
+            window._hotkey_screenshot_requested.emit()
             window._hotkey_talk_pressed.emit()
             window._hotkey_talk_released.emit()
             window._hotkey_listen_requested.emit()
@@ -361,13 +437,22 @@ class UiRegressionTests(unittest.TestCase):
             window._hotkey_toggle_requested.emit()
             window._hotkey_answer_requested.emit()
             window._hotkey_clear_requested.emit()
+            window._hotkey_screenshot_requested.emit()
             window._hotkey_talk_pressed.emit()
             window._hotkey_talk_released.emit()
             window._hotkey_listen_requested.emit()
 
         self.assertEqual(
             actions,
-            ["toggle", "ask_recent", "clear", "talk_start", "talk_stop", "listen"],
+            [
+                "toggle",
+                "ask_recent",
+                "clear",
+                "screenshot",
+                "talk_start",
+                "talk_stop",
+                "listen",
+            ],
         )
         with patch("app.ui.cfgmod.save_ui_position"):
             window.close()
@@ -389,6 +474,29 @@ class UiRegressionTests(unittest.TestCase):
         self.assertEqual(bar.value(), bar.maximum())
         with patch("app.ui.cfgmod.save_ui_position"):
             window.close()
+
+    def test_capture_selection_maps_to_physical_screen_pixels(self) -> None:
+        from PyQt6.QtCore import QRect
+        from PyQt6.QtGui import QPixmap
+
+        from app.ui import RegionCaptureOverlay
+
+        class Screen:
+            @staticmethod
+            def geometry() -> QRect:
+                return QRect(100, 50, 400, 300)
+
+            @staticmethod
+            def grabWindow(_window_id: int) -> QPixmap:
+                return QPixmap(800, 600)
+
+        overlay = RegionCaptureOverlay(Screen())
+        self.assertEqual(
+            overlay._source_rect(QRect(10, 20, 100, 50)),
+            QRect(20, 40, 200, 100),
+        )
+        overlay._completed = True
+        overlay.close()
 
 
 if __name__ == "__main__":

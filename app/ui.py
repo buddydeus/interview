@@ -6,13 +6,25 @@
 
 from __future__ import annotations
 
+import base64
 import copy
 import sys
 import threading
 from string import Template
 
-from PyQt6.QtCore import Qt, QRect, QTimer, QPoint, pyqtSignal, pyqtSlot
-from PyQt6.QtGui import QFont, QGuiApplication, QKeySequence, QShortcut, QTextCursor
+from PyQt6.QtCore import QBuffer, QByteArray, QIODevice, Qt, QRect, QTimer, QPoint, pyqtSignal, pyqtSlot
+from PyQt6.QtGui import (
+    QColor,
+    QCursor,
+    QFont,
+    QGuiApplication,
+    QImage,
+    QKeySequence,
+    QPainter,
+    QPen,
+    QShortcut,
+    QTextCursor,
+)
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -246,6 +258,118 @@ def _claim_single_instance() -> bool:
     return True
 
 
+def _image_data_url(image: QImage) -> str:
+    """把截图压到适合接口传输的尺寸，并编码成内存 PNG。"""
+    if image.isNull():
+        raise ValueError("截图内容为空")
+    if max(image.width(), image.height()) > 1920:
+        image = image.scaled(
+            1920,
+            1920,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+    data = QByteArray()
+    buffer = QBuffer(data)
+    buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+    if not image.save(buffer, "PNG"):
+        raise ValueError("截图编码失败")
+    encoded = base64.b64encode(bytes(data)).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
+
+
+class RegionCaptureOverlay(QWidget):
+    captured = pyqtSignal(object)
+    cancelled = pyqtSignal()
+
+    def __init__(self, screen):
+        super().__init__(None)
+        self._background = screen.grabWindow(0).toImage()
+        if self._background.isNull():
+            raise RuntimeError("无法读取当前屏幕")
+        self._start: QPoint | None = None
+        self._current: QPoint | None = None
+        self._completed = False
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self.setGeometry(screen.geometry())
+        self.setCursor(Qt.CursorShape.CrossCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def _selection(self) -> QRect:
+        if self._start is None or self._current is None:
+            return QRect()
+        return QRect(self._start, self._current).normalized().intersected(self.rect())
+
+    def _source_rect(self, selection: QRect) -> QRect:
+        scale_x = self._background.width() / max(1, self.width())
+        scale_y = self._background.height() / max(1, self.height())
+        return QRect(
+            round(selection.x() * scale_x),
+            round(selection.y() * scale_y),
+            max(1, round(selection.width() * scale_x)),
+            max(1, round(selection.height() * scale_y)),
+        ).intersected(self._background.rect())
+
+    def showEvent(self, event):  # noqa: N802 - Qt 命名
+        super().showEvent(event)
+        self.raise_()
+        self.activateWindow()
+        self.setFocus()
+
+    def paintEvent(self, event):  # noqa: N802 - Qt 命名
+        painter = QPainter(self)
+        painter.drawImage(self.rect(), self._background)
+        painter.fillRect(self.rect(), QColor(0, 0, 0, 115))
+        selection = self._selection()
+        if not selection.isEmpty():
+            painter.drawImage(selection, self._background, self._source_rect(selection))
+            painter.setPen(QPen(QColor("#5B8DEF"), 2))
+            painter.drawRect(selection.adjusted(0, 0, -1, -1))
+
+    def mousePressEvent(self, event):  # noqa: N802 - Qt 命名
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        self._start = event.position().toPoint()
+        self._current = self._start
+        self.update()
+
+    def mouseMoveEvent(self, event):  # noqa: N802 - Qt 命名
+        if self._start is None:
+            return
+        self._current = event.position().toPoint()
+        self.update()
+
+    def mouseReleaseEvent(self, event):  # noqa: N802 - Qt 命名
+        if event.button() != Qt.MouseButton.LeftButton or self._start is None:
+            return
+        self._current = event.position().toPoint()
+        selection = self._selection()
+        if selection.width() < 8 or selection.height() < 8:
+            self.close()
+            return
+        image = self._background.copy(self._source_rect(selection))
+        self._completed = True
+        self.hide()
+        self.captured.emit(image)
+        self.close()
+
+    def keyPressEvent(self, event):  # noqa: N802 - Qt 命名
+        if event.key() == Qt.Key.Key_Escape:
+            self.close()
+            return
+        super().keyPressEvent(event)
+
+    def closeEvent(self, event):  # noqa: N802 - Qt 命名
+        if not self._completed:
+            self.cancelled.emit()
+        super().closeEvent(event)
+
+
 # --------------------------------------------------------------------------- #
 # 设置对话框
 # --------------------------------------------------------------------------- #
@@ -308,6 +432,7 @@ class SettingsDialog(QDialog):
         self.cb_model = QComboBox()
         self.cb_model.setEditable(True)
         self.cb_model.addItems([
+            "deepseek-flash",
             "deepseek-chat",
             "deepseek-reasoner",
         ])
@@ -482,6 +607,7 @@ class SettingsDialog(QDialog):
         self.ed_hotkey_toggle = QLineEdit(str(ui.get("hotkey_toggle", "")))
         self.ed_hotkey_answer = QLineEdit(str(ui.get("hotkey_answer", "n")))
         self.ed_hotkey_clear = QLineEdit(str(ui.get("hotkey_clear", "m")))
+        self.ed_hotkey_screenshot = QLineEdit(str(ui.get("hotkey_screenshot", "j")))
         self.ed_hotkey_talk = QLineEdit(str(ui.get("hotkey_talk", "space")))
         self.ed_hotkey_listen = QLineEdit(str(ui.get("hotkey_listen", "b")))
 
@@ -493,6 +619,7 @@ class SettingsDialog(QDialog):
         form.addRow("显示/隐藏热键", self.ed_hotkey_toggle)
         form.addRow("问最近按键", self.ed_hotkey_answer)
         form.addRow("清空按键", self.ed_hotkey_clear)
+        form.addRow("截图提问按键", self.ed_hotkey_screenshot)
         form.addRow("按住说话按键", self.ed_hotkey_talk)
         form.addRow("监听开关按键", self.ed_hotkey_listen)
         return page
@@ -617,6 +744,9 @@ class SettingsDialog(QDialog):
         cfgmod.set_(self.cfg, "ui.hotkey_toggle", self.ed_hotkey_toggle.text().strip())
         cfgmod.set_(self.cfg, "ui.hotkey_answer", self.ed_hotkey_answer.text().strip())
         cfgmod.set_(self.cfg, "ui.hotkey_clear", self.ed_hotkey_clear.text().strip())
+        cfgmod.set_(
+            self.cfg, "ui.hotkey_screenshot", self.ed_hotkey_screenshot.text().strip()
+        )
         cfgmod.set_(self.cfg, "ui.hotkey_talk", self.ed_hotkey_talk.text().strip())
         cfgmod.set_(self.cfg, "ui.hotkey_listen", self.ed_hotkey_listen.text().strip())
         return self.cfg
@@ -635,6 +765,7 @@ class OverlayWindow(QWidget):
     _hotkey_toggle_requested = pyqtSignal()
     _hotkey_answer_requested = pyqtSignal()
     _hotkey_clear_requested = pyqtSignal()
+    _hotkey_screenshot_requested = pyqtSignal()
     _hotkey_talk_pressed = pyqtSignal()
     _hotkey_talk_released = pyqtSignal()
     _hotkey_listen_requested = pyqtSignal()
@@ -646,6 +777,7 @@ class OverlayWindow(QWidget):
         self._hotkey_toggle_requested.connect(self._toggle_visible_from_hotkey)
         self._hotkey_answer_requested.connect(self._ask_recent_from_hotkey)
         self._hotkey_clear_requested.connect(self._clear_from_hotkey)
+        self._hotkey_screenshot_requested.connect(self._start_screenshot_from_hotkey)
         self._hotkey_talk_pressed.connect(self._start_voice_from_hotkey)
         self._hotkey_talk_released.connect(self._stop_voice_from_hotkey)
         self._hotkey_listen_requested.connect(self._toggle_running_from_hotkey)
@@ -661,6 +793,9 @@ class OverlayWindow(QWidget):
         # 回答增量。否则清空完屏幕又会被填满，看起来像按钮坏了。
         self._answer_muted = False
         self._capture_ok = False
+        self._capture_in_progress = False
+        self._capture_screen = None
+        self._capture_overlay: RegionCaptureOverlay | None = None
         self._hotkeys: list = []
         self._voice_hotkey_started = False
         # 实时字幕的逐句行：(行容器, 文本标签, 提问按钮)，用于改字号和裁剪
@@ -832,6 +967,10 @@ class OverlayWindow(QWidget):
         )
         self.btn_ask.clicked.connect(self.pipeline.ask_recent)
 
+        self.btn_screenshot = QPushButton("截图提问")
+        self.btn_screenshot.setToolTip("框选屏幕区域后立即交给多模态模型回答")
+        self.btn_screenshot.clicked.connect(self._start_screenshot)
+
         self.btn_copy = QPushButton("复制")
         self.btn_copy.setToolTip("复制当前回答")
         self.btn_copy.clicked.connect(self._copy_answer)
@@ -848,6 +987,7 @@ class OverlayWindow(QWidget):
 
         footer.addWidget(self.btn_start)
         footer.addWidget(self.btn_ask)
+        footer.addWidget(self.btn_screenshot)
         footer.addWidget(self.btn_copy)
         footer.addWidget(self.btn_clear)
         footer.addStretch(1)
@@ -952,6 +1092,55 @@ class OverlayWindow(QWidget):
 
     def _flash(self, text: str) -> None:
         self.lbl_status.setText(text)
+
+    def _start_screenshot(self) -> None:
+        if self._capture_in_progress:
+            return
+        screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
+        if screen is None:
+            self._flash("没有找到可截图的屏幕")
+            return
+        self._capture_in_progress = True
+        self._capture_screen = screen
+        self.hide()
+        QTimer.singleShot(120, self._show_capture_overlay)
+
+    def _show_capture_overlay(self) -> None:
+        if not self._capture_in_progress or self._capture_screen is None:
+            return
+        try:
+            overlay = RegionCaptureOverlay(self._capture_screen)
+        except Exception as exc:
+            self._restore_after_screenshot()
+            self._flash(f"截图失败：{exc}")
+            return
+        self._capture_overlay = overlay
+        overlay.captured.connect(self._submit_screenshot)
+        overlay.cancelled.connect(self._cancel_screenshot)
+        overlay.show()
+
+    def _submit_screenshot(self, image: QImage) -> None:
+        try:
+            image_url = _image_data_url(image)
+        except Exception as exc:
+            self._restore_after_screenshot()
+            self._flash(f"截图失败：{exc}")
+            return
+        self._restore_after_screenshot()
+        self.pipeline.ask_image(image_url)
+        self._flash("截图已提交，正在生成回答")
+
+    def _cancel_screenshot(self) -> None:
+        self._restore_after_screenshot()
+        self._flash("已取消截图")
+
+    def _restore_after_screenshot(self) -> None:
+        self._capture_in_progress = False
+        self._capture_screen = None
+        self._capture_overlay = None
+        self.show()
+        self.raise_()
+        self.activateWindow()
 
     # --- 实时字幕：逐句行 ---
 
@@ -1155,7 +1344,9 @@ class OverlayWindow(QWidget):
     # --- 全局热键 ---
 
     def _hotkeys_suspended(self) -> bool:
-        return self.isActiveWindow() and self.ed_ask.hasFocus()
+        return self._capture_in_progress or (
+            self.isActiveWindow() and self.ed_ask.hasFocus()
+        )
 
     def _setup_hotkeys(self) -> None:
         self._teardown_hotkeys()
@@ -1211,6 +1402,10 @@ class OverlayWindow(QWidget):
         )
         bind_action(
             str(ui.get("hotkey_clear") or ""), self._hotkey_clear_requested.emit
+        )
+        bind_action(
+            str(ui.get("hotkey_screenshot") or ""),
+            self._hotkey_screenshot_requested.emit,
         )
         bind_press_cycle(
             str(ui.get("hotkey_talk") or ""),
@@ -1276,6 +1471,12 @@ class OverlayWindow(QWidget):
         if self._hotkeys_suspended():
             return
         self._toggle_running()
+
+    @pyqtSlot()
+    def _start_screenshot_from_hotkey(self) -> None:
+        if self._hotkeys_suspended():
+            return
+        self._start_screenshot()
 
 
 def run(cfg: dict) -> int:

@@ -61,8 +61,8 @@ def _explain_error(exc: Exception, thinking_sent: bool) -> Exception:
         f"原始信息：{text[:300]}"
     )
 
-SYSTEM_TEMPLATE = """你是候选人的实时面试答题助手。输入是最近一段面试语音转写，\
-可能包含铺垫、口误、同音词、多句内容或不完整问题。你的任务是生成候选人可以直接口述的回答。
+SYSTEM_TEMPLATE = """你是候选人的实时面试答题助手。输入是最近一段面试语音转写或用户截取的屏幕区域，\
+可能包含铺垫、口误、同音词、多句内容、不完整问题、代码或图表。你的任务是生成候选人可以直接口述的回答。
 
 事实边界：
 1. 候选人经历只能来自【候选人简历 / 背景】。
@@ -89,6 +89,15 @@ SYSTEM_TEMPLATE = """你是候选人的实时面试答题助手。输入是最�
 5. 除非明确要求写代码，否则不输出 Markdown、标题或代码块。
 
 表达风格：{style}"""
+
+SCREENSHOT_RULES = """
+
+截图请求补充规则：
+1. 用户主动框选截图已经构成明确的求解请求，不再执行“是否构成明确问题”的判断。
+2. 必须读取并解答截图主体；代码、报错、题干、选项或图表即使没有问号，也视为待回答的问题。
+3. 截图包含多个问题时，优先回答最完整、最靠下或视觉上最突出的一个。
+4. 不得输出“（未识别到明确问题）”；只有截图确实为空白或无法辨认时，才简短说明无法读取。
+"""
 
 
 class Answerer:
@@ -242,18 +251,32 @@ class Answerer:
             )
         return text
 
-    def stream(self, question: str, history: list[dict] | None = None) -> Iterator[str]:
+    def stream(
+        self,
+        question: str,
+        history: list[dict] | None = None,
+        image_url: str = "",
+    ) -> Iterator[str]:
         """流式产出回答片段。调用方中途 break 即可停止生成。"""
         self._cancel.clear()
         client = self._client_or_create()
 
-        messages: list[dict] = [{"role": "system", "content": self._system_prompt()}]
+        system_prompt = self._system_prompt()
+        if image_url:
+            system_prompt += SCREENSHOT_RULES
+        messages: list[dict] = [{"role": "system", "content": system_prompt}]
         for turn in (history or []):
             if turn.get("q"):
                 messages.append({"role": "user", "content": turn["q"]})
             if turn.get("a"):
                 messages.append({"role": "assistant", "content": turn["a"]})
-        messages.append({"role": "user", "content": question})
+        content: str | list[dict] = question
+        if image_url:
+            content = [
+                {"type": "text", "text": question},
+                {"type": "image_url", "image_url": {"url": image_url}},
+            ]
+        messages.append({"role": "user", "content": content})
 
         extra = self._thinking_kwargs()
         try:
