@@ -7,12 +7,15 @@ import time
 import unittest
 from unittest.mock import patch
 
+import numpy as np
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtWidgets import QApplication
 
 from app.config import DEFAULTS
 from app.pipeline import Pipeline
+from app.voice_input import VoiceInput
 
 
 class _BlockingAnswerer:
@@ -84,6 +87,31 @@ class PipelineRegressionTests(unittest.TestCase):
         self.assertIn("device lost", events[0]["text"])
 
 
+class VoiceInputRegressionTests(unittest.TestCase):
+    def test_each_recording_thread_balances_com_lifecycle(self) -> None:
+        class Transcriber:
+            @staticmethod
+            def transcribe(_audio) -> str:
+                return "测试"
+
+        voice = VoiceInput(copy.deepcopy(DEFAULTS), lambda: Transcriber())
+        samples = np.zeros(8000, dtype=np.float32)
+
+        with (
+            patch.object(voice, "_record", return_value=samples),
+            patch("pythoncom.CoInitialize") as initialize,
+            patch("pythoncom.CoUninitialize") as uninitialize,
+        ):
+            for _ in range(3):
+                self.assertTrue(voice.start())
+                voice._worker.join(timeout=1.0)
+                self.assertFalse(voice.busy)
+                self.assertIn("done", [event["type"] for event in voice.drain()])
+
+        self.assertEqual(initialize.call_count, 3)
+        self.assertEqual(uninitialize.call_count, 3)
+
+
 class UiRegressionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -149,6 +177,75 @@ class UiRegressionTests(unittest.TestCase):
 
         self.assertIn("连接成功", dialog.lbl_xf_test.text())
         dialog.close()
+
+    def test_hotkey_settings_are_editable(self) -> None:
+        dialog = self._dialog()
+        self.assertEqual(dialog.ed_hotkey_talk.text(), "space")
+        self.assertEqual(dialog.ed_hotkey_listen.text(), "b")
+
+        dialog.ed_hotkey_talk.setText("f8")
+        dialog.ed_hotkey_listen.setText("f9")
+        cfg = dialog.result_config()
+
+        self.assertEqual(cfg["ui"]["hotkey_talk"], "f8")
+        self.assertEqual(cfg["ui"]["hotkey_listen"], "f9")
+        dialog.close()
+
+    def test_talk_and_listen_hotkeys_ignore_key_repeat(self) -> None:
+        from app.ui import OverlayWindow
+
+        callbacks = {}
+        actions: list[tuple[str, int]] = []
+
+        def hook_key(key, callback, **_kwargs):
+            callbacks[key] = callback
+            return object()
+
+        class KeyEvent:
+            def __init__(self, event_type: str):
+                self.event_type = event_type
+
+        class ProbeWindow(OverlayWindow):
+            def _start_voice(self) -> bool:
+                actions.append(("talk_start", threading.get_ident()))
+                return True
+
+            def _stop_voice(self) -> None:
+                actions.append(("talk_stop", threading.get_ident()))
+
+            def _toggle_running(self) -> None:
+                actions.append(("listen", threading.get_ident()))
+
+        with (
+            patch("app.ui.Pipeline.prewarm"),
+            patch("keyboard.add_hotkey", return_value=object()),
+            patch("keyboard.hook_key", side_effect=hook_key),
+            patch("keyboard.unhook"),
+        ):
+            window = ProbeWindow(copy.deepcopy(DEFAULTS))
+
+            def press_keys() -> None:
+                callbacks["space"](KeyEvent("down"))
+                callbacks["space"](KeyEvent("down"))
+                callbacks["space"](KeyEvent("up"))
+                callbacks["b"](KeyEvent("down"))
+                callbacks["b"](KeyEvent("down"))
+                callbacks["b"](KeyEvent("up"))
+
+            thread = threading.Thread(target=press_keys)
+            thread.start()
+            thread.join(timeout=1.0)
+
+            self.assertTrue(self._wait_until(lambda: len(actions) == 3))
+            self.assertEqual([name for name, _thread_id in actions], [
+                "talk_start", "talk_stop", "listen"
+            ])
+            self.assertEqual(
+                [thread_id for _name, thread_id in actions],
+                [threading.get_ident()] * 3,
+            )
+            with patch("app.ui.cfgmod.save_ui_position"):
+                window.close()
 
     def test_hotkey_signal_runs_slot_on_gui_thread(self) -> None:
         from app.ui import OverlayWindow

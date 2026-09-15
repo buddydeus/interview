@@ -6,6 +6,10 @@ audio:
   # 这一步很关键：如果默认扬声器是显示器（HDMI/DP 音频）而人戴着耳机听，
   # 抓默认扬声器会永远抓不到声音。想固定设备就用 `run.py --list-devices` 拿 id 填这里。
   device: ""
+  # 「按住说话」用的麦克风（你自己说话）。留空 = 系统默认输入设备。
+  # 和上面的 device 是两类设备：device 抓的是系统输出（面试官的声音），
+  # 这里抓的是麦克风（你的声音）。想固定就用 `run.py --check` 看设备名。
+  mic_device: ""
   samplerate: 0          # 0 = 自动（优先 16k，失败则退回设备原生采样率）
   block_ms: 30
   noise_ratio: 2.6       # 音量超过噪声底多少倍判定为人声
@@ -72,9 +76,9 @@ llm:
   #   low / medium / high / max = 开启思考并指定强度
   # 注意：部分第三方网关不认 thinking 字段，换网关后若报 400 就改回 auto。
   thinking: off
-  max_chars: 220         # 期望回答字数上限（写进提示词约束）
+  max_chars: 260         # 期望回答字数上限（写进提示词约束）
   timeout: 60
-  style: "口语化、条理清晰。先说结论，再列 2~4 个要点，每点一句话，可以直接照着念。"
+  style: "使用第一人称口语回答，表达沉稳、具体、简洁。围绕目标岗位突出可迁移经验，但不虚构未做过的技术或项目。"
   resume: ""             # 你的简历/背景，越具体回答越贴合
   jd: ""                 # 目标岗位 JD，用来对齐回答重点
   history_rounds: 4      # 携带最近几轮问答作为上下文
@@ -89,3 +93,5 @@ ui:
   always_on_top: true
   hotkey_toggle: "ctrl+alt+h"  # 显示/隐藏
   hotkey_answer: "ctrl+alt+q"  # 手动把最近字幕当问题提问
+  hotkey_talk: "space"         # 单键：按住说话，松开结束；留空禁用
+  hotkey_listen: "b"           # 单键：开始/停止监听；留空禁用

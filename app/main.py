@@ -118,6 +118,16 @@ def cmd_check(cfg: dict) -> int:
             print(f"       本地已有模型：{', '.join(local)}")
 
     print(f"\n防截屏           {'开启' if cfg['ui'].get('exclude_from_capture') else '关闭'}")
+    # 「按住说话」用的麦克风。和上面那些 loopback 设备是两码事：那些是"听面试官"，
+    # 这个是"听你自己"。这一项不通，界面上的「按住说话」按下去就没反应。
+    try:
+        from . import audio as audio_mod
+
+        mic = audio_mod.resolve_microphone(str(cfg["audio"].get("mic_device") or ""))
+        print(f"[OK]   麦克风（按住说话）：{mic.name}")
+    except Exception as exc:
+        print(f"[FAIL] 麦克风不可用，「按住说话」会失败：{exc}")
+        ok = False
     print(f"大模型           {cfg['llm']['model']} @ {cfg['llm']['base_url']}")
     from .llm import Answerer
 

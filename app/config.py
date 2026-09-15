@@ -71,7 +71,7 @@ DEFAULTS: dict[str, Any] = {
         "model": "deepseek-chat",
         "temperature": 0.4,
         "max_tokens": 2000,
-        "max_chars": 220,
+        "max_chars": 260,
         "timeout": 60,
         # 思考模式。deepseek-v4 系列默认开着思考，会先吐几百到几千字的
         # reasoning_content 再给正文——面试场景纯属浪费，实测关掉后
@@ -80,7 +80,7 @@ DEFAULTS: dict[str, Any] = {
         #   auto   = 不干预，用服务端默认（默认开启，强度 high）
         #   low / medium / high / max = 开启思考并指定强度
         "thinking": "off",
-        "style": "口语化、条理清晰。先说结论，再列 2~4 个要点，每点一句话，可以直接照着念。",
+        "style": "使用第一人称口语回答，表达沉稳、具体、简洁。围绕目标岗位突出可迁移经验，但不虚构未做过的技术或项目。",
         "resume": "",
         "jd": "",
         "history_rounds": 4,
@@ -97,6 +97,8 @@ DEFAULTS: dict[str, Any] = {
         "always_on_top": True,
         "hotkey_toggle": "ctrl+alt+h",
         "hotkey_answer": "ctrl+alt+q",
+        "hotkey_talk": "space",
+        "hotkey_listen": "b",
     },
 }
 

@@ -222,6 +222,30 @@ def apply_always_on_top(widget: QWidget, enabled: bool) -> None:
     widget.show()
 
 
+_APP_MUTEX = None
+
+
+def _claim_single_instance() -> bool:
+    """Windows 命名互斥量：避免多个实例同时注册并处理全局热键。"""
+    if sys.platform != "win32":
+        return True
+
+    import ctypes
+
+    global _APP_MUTEX
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW.argtypes = (ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p)
+    kernel32.CreateMutexW.restype = ctypes.c_void_p
+    handle = kernel32.CreateMutexW(None, False, "Local\\InterviewCopilot")
+    if not handle:
+        return True
+    if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
+        kernel32.CloseHandle(handle)
+        return False
+    _APP_MUTEX = (kernel32, handle)
+    return True
+
+
 # --------------------------------------------------------------------------- #
 # 设置对话框
 # --------------------------------------------------------------------------- #
@@ -452,6 +476,8 @@ class SettingsDialog(QDialog):
         self.chk_top.setChecked(bool(ui.get("always_on_top", True)))
         self.ed_hotkey_toggle = QLineEdit(str(ui.get("hotkey_toggle", "")))
         self.ed_hotkey_answer = QLineEdit(str(ui.get("hotkey_answer", "")))
+        self.ed_hotkey_talk = QLineEdit(str(ui.get("hotkey_talk", "space")))
+        self.ed_hotkey_listen = QLineEdit(str(ui.get("hotkey_listen", "b")))
 
         form.addRow("主题", self.cb_theme)
         form.addRow("不透明度", self.sl_opacity)
@@ -460,6 +486,8 @@ class SettingsDialog(QDialog):
         form.addRow("", self.chk_top)
         form.addRow("显示/隐藏热键", self.ed_hotkey_toggle)
         form.addRow("手动提问热键", self.ed_hotkey_answer)
+        form.addRow("按住说话按键", self.ed_hotkey_talk)
+        form.addRow("监听开关按键", self.ed_hotkey_listen)
         return page
 
     def _test_llm(self) -> None:
@@ -580,6 +608,8 @@ class SettingsDialog(QDialog):
         cfgmod.set_(self.cfg, "ui.always_on_top", self.chk_top.isChecked())
         cfgmod.set_(self.cfg, "ui.hotkey_toggle", self.ed_hotkey_toggle.text().strip())
         cfgmod.set_(self.cfg, "ui.hotkey_answer", self.ed_hotkey_answer.text().strip())
+        cfgmod.set_(self.cfg, "ui.hotkey_talk", self.ed_hotkey_talk.text().strip())
+        cfgmod.set_(self.cfg, "ui.hotkey_listen", self.ed_hotkey_listen.text().strip())
         return self.cfg
 
 
@@ -595,6 +625,9 @@ def parent_theme(cfg: dict) -> dict:
 class OverlayWindow(QWidget):
     _hotkey_toggle_requested = pyqtSignal()
     _hotkey_answer_requested = pyqtSignal()
+    _hotkey_talk_pressed = pyqtSignal()
+    _hotkey_talk_released = pyqtSignal()
+    _hotkey_listen_requested = pyqtSignal()
 
     def __init__(self, cfg: dict):
         super().__init__()
@@ -602,6 +635,9 @@ class OverlayWindow(QWidget):
         self.pipeline = Pipeline(cfg)
         self._hotkey_toggle_requested.connect(self._toggle_visible)
         self._hotkey_answer_requested.connect(self._ask_recent_from_hotkey)
+        self._hotkey_talk_pressed.connect(self._start_voice_from_hotkey)
+        self._hotkey_talk_released.connect(self._stop_voice_from_hotkey)
+        self._hotkey_listen_requested.connect(self._toggle_running)
         # 立刻在后台把大模型链路热起来（import openai + 建客户端 + 建连约 4 秒）。
         # 等用户点「开始监听」时通常已经热好了，第一次提问不再干等。
         self.pipeline.prewarm()
@@ -615,6 +651,7 @@ class OverlayWindow(QWidget):
         self._answer_muted = False
         self._capture_ok = False
         self._hotkeys: list = []
+        self._voice_hotkey_started = False
         # 实时字幕的逐句行：(行容器, 文本标签, 提问按钮)，用于改字号和裁剪
         self._seg_rows: list[tuple[QWidget, QLabel, QPushButton]] = []
         self._max_seg_rows = 60          # 超过就丢最旧的，防止窗口无限增长
@@ -749,6 +786,9 @@ class OverlayWindow(QWidget):
         ask_row.addWidget(self.btn_talk, 0)
         ask_row.addWidget(self.btn_send, 0)
         lay.addLayout(ask_row)
+        # 一开始就把 recording 属性定下来，别让它停在 None——
+        # 样式表靠这个属性切换"录音中"的红色，属性没设过就不会生效。
+        self._set_talk_state("idle")
 
         # 回答
         lay.addWidget(QLabel("建议回答", objectName="section"))
@@ -968,18 +1008,23 @@ class OverlayWindow(QWidget):
 
     # --- 按住说话 ---
 
-    def _start_voice(self) -> None:
+    def _start_voice(self) -> bool:
         """按下按钮。真正的录音在后台线程里，这里立刻返回。"""
         if not self.voice.start():
             # 上一次还在识别。按住不放没用，明确说一句，别让人以为按坏了。
             self._flash("上一段还在识别，稍等一下再按")
-            return
+            return False
         self._set_talk_state("recording")
         self.lbl_status.setText("正在听…说完松开按钮")
+        return True
 
     def _stop_voice(self) -> None:
-        """松开按钮：停录，线程接着做识别，结果从事件队列回来。"""
-        if not self.voice.listening:
+        """松开按钮：停录，线程接着做识别，结果从事件队列回来。
+
+        判据用 busy 而不是 listening：录音满了 30 秒会自动停，那时已经不在录、
+        但还在识别——这种"手还按着、录已经停了"的情况也得能正常收尾。
+        """
+        if not self.voice.busy:
             return
         self.voice.stop()
         self._set_talk_state("working")
@@ -998,7 +1043,6 @@ class OverlayWindow(QWidget):
         比每次都要再确认一遍划算。
         """
         self.ed_ask.setText(text)
-        self._flash(f"语音提问：{text[:24]}{'…' if len(text) > 24 else ''}")
         self._ask_sentence(text)
 
     def _show_answer_placeholder(self) -> None:
@@ -1105,12 +1149,46 @@ class OverlayWindow(QWidget):
             if not combo:
                 return
             try:
-                self._hotkeys.append(keyboard.add_hotkey(combo, action, suppress=False))
+                handle = keyboard.add_hotkey(combo, action, suppress=False)
             except Exception:
-                pass
+                return
+            self._hotkeys.append(lambda handle=handle: keyboard.remove_hotkey(handle))
+
+        def bind_press_cycle(key: str, pressed, released=None) -> None:
+            """同一次物理按键只触发一次，避免长按产生的自动重复。"""
+            if not key:
+                return
+            lock = threading.Lock()
+            down = False
+
+            def on_event(event) -> None:
+                nonlocal down
+                is_down = event.event_type == keyboard.KEY_DOWN
+                with lock:
+                    if down == is_down:
+                        return
+                    down = is_down
+                if is_down:
+                    pressed()
+                elif released is not None:
+                    released()
+
+            try:
+                handle = keyboard.hook_key(key, on_event, suppress=False)
+            except Exception:
+                return
+            self._hotkeys.append(lambda handle=handle: keyboard.unhook(handle))
 
         bind(str(ui.get("hotkey_toggle") or ""), self._hotkey_toggle_requested.emit)
         bind(str(ui.get("hotkey_answer") or ""), self._hotkey_answer_requested.emit)
+        bind_press_cycle(
+            str(ui.get("hotkey_talk") or ""),
+            self._hotkey_talk_pressed.emit,
+            self._hotkey_talk_released.emit,
+        )
+        bind_press_cycle(
+            str(ui.get("hotkey_listen") or ""), self._hotkey_listen_requested.emit
+        )
 
     def _teardown_hotkeys(self) -> None:
         if not self._hotkeys:
@@ -1118,11 +1196,26 @@ class OverlayWindow(QWidget):
         try:
             import keyboard
 
-            for handle in self._hotkeys:
-                keyboard.remove_hotkey(handle)
+            for unbind in self._hotkeys:
+                try:
+                    unbind()
+                except Exception:
+                    pass
         except Exception:
             pass
         self._hotkeys = []
+
+    @pyqtSlot()
+    def _start_voice_from_hotkey(self) -> None:
+        if not self._voice_hotkey_started:
+            self._voice_hotkey_started = self._start_voice()
+
+    @pyqtSlot()
+    def _stop_voice_from_hotkey(self) -> None:
+        if not self._voice_hotkey_started:
+            return
+        self._voice_hotkey_started = False
+        self._stop_voice()
 
     @pyqtSlot()
     def _toggle_visible(self) -> None:
@@ -1134,6 +1227,8 @@ class OverlayWindow(QWidget):
 
 
 def run(cfg: dict) -> int:
+    if not _claim_single_instance():
+        return 0
     app = QApplication(sys.argv)
     app.setApplicationName("面试副驾")
     window = OverlayWindow(cfg)

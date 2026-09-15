@@ -14,6 +14,7 @@ import time
 from typing import Callable
 
 import numpy as np
+import pythoncom
 
 from .audio import TARGET_SR, AudioError, resample_to_16k, resolve_microphone
 
@@ -85,49 +86,60 @@ class VoiceInput:
         return True
 
     def stop(self) -> None:
-        """松开按钮：停止录音，线程会接着做识别。"""
+        """松开按钮：停止录音，线程会接着做识别。
+
+        立刻把 listening 置 False（不等线程自己收尾）——调用方松开手之后
+        就该认为"不录了"，否则界面要等一个采集块的时间才知道状态变了。
+        """
+        self._listening = False
         if self._stop is not None:
             self._stop.set()
 
     # ---------- 线程体 ----------
 
     def _run(self, stop: threading.Event) -> None:
-        audio = np.zeros(0, dtype=np.float32)
+        # WASAPI 基于 COM，且 COM 初始化只对当前线程有效。每次录音都会创建
+        # 新线程，因此每个工作线程都必须独立初始化并成对释放 COM。
+        pythoncom.CoInitialize()
         try:
-            audio = self._record(stop)
-        except AudioError as exc:
-            self._emit({"type": "error", "text": str(exc)})
-        except Exception as exc:
-            self._emit({"type": "error", "text": f"录音失败：{exc}"})
+            audio = np.zeros(0, dtype=np.float32)
+            try:
+                audio = self._record(stop)
+            except AudioError as exc:
+                self._emit({"type": "error", "text": str(exc)})
+            except Exception as exc:
+                self._emit({"type": "error", "text": f"录音失败：{exc}"})
+            finally:
+                self._listening = False
+
+            seconds = len(audio) / TARGET_SR
+            if seconds < MIN_SECONDS:
+                self._emit(
+                    {
+                        "type": "error",
+                        "text": "按住说话的时间太短了——按住别放，说完再松开。",
+                    }
+                )
+                self._emit({"type": "done"})
+                return
+
+            self._emit({"type": "status", "text": f"正在识别 {seconds:.1f} 秒语音…"})
+            try:
+                transcriber = self._get_transcriber()
+                text = transcriber.transcribe(audio)
+            except Exception as exc:
+                self._emit({"type": "error", "text": f"语音识别失败：{exc}"})
+                self._emit({"type": "done"})
+                return
+
+            text = (text or "").strip()
+            if text:
+                self._emit({"type": "text", "text": text})
+            else:
+                self._emit({"type": "error", "text": "没听清，再说一次试试。"})
+            self._emit({"type": "done"})
         finally:
-            self._listening = False
-
-        seconds = len(audio) / TARGET_SR
-        if seconds < MIN_SECONDS:
-            self._emit(
-                {
-                    "type": "error",
-                    "text": "按住说话的时间太短了——按住别放，说完再松开。",
-                }
-            )
-            self._emit({"type": "done"})
-            return
-
-        self._emit({"type": "status", "text": f"正在识别 {seconds:.1f} 秒语音…"})
-        try:
-            transcriber = self._get_transcriber()
-            text = transcriber.transcribe(audio)
-        except Exception as exc:
-            self._emit({"type": "error", "text": f"语音识别失败：{exc}"})
-            self._emit({"type": "done"})
-            return
-
-        text = (text or "").strip()
-        if text:
-            self._emit({"type": "text", "text": text})
-        else:
-            self._emit({"type": "error", "text": "没听清，再说一次试试。"})
-        self._emit({"type": "done"})
+            pythoncom.CoUninitialize()
 
     def _record(self, stop: threading.Event) -> np.ndarray:
         mic = resolve_microphone(str(self.cfg["audio"].get("mic_device") or ""))
