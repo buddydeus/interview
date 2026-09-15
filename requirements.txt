@@ -1,0 +1,18 @@
+# 语音识别（本地离线）
+faster-whisper>=1.0.3
+# 语音识别（讯飞在线，走 WebSocket）
+websocket-client>=1.7
+# 系统声音采集（Windows WASAPI loopback）
+soundcard>=0.4.3
+# 数值计算
+numpy>=1.26
+# 悬浮窗界面
+PyQt6>=6.6
+# 大模型调用（DeepSeek 走 OpenAI 兼容协议）
+openai>=1.30
+# 配置读写
+PyYAML>=6.0
+# Windows 窗口防截屏 API
+pywin32>=306; sys_platform == "win32"
+# 全局快捷键（可选，装不上不影响主流程）
+keyboard>=0.13.5
