@@ -180,18 +180,24 @@ class UiRegressionTests(unittest.TestCase):
 
     def test_hotkey_settings_are_editable(self) -> None:
         dialog = self._dialog()
+        self.assertEqual(dialog.ed_hotkey_answer.text(), "n")
+        self.assertEqual(dialog.ed_hotkey_clear.text(), "m")
         self.assertEqual(dialog.ed_hotkey_talk.text(), "space")
         self.assertEqual(dialog.ed_hotkey_listen.text(), "b")
 
+        dialog.ed_hotkey_answer.setText("f6")
+        dialog.ed_hotkey_clear.setText("f7")
         dialog.ed_hotkey_talk.setText("f8")
         dialog.ed_hotkey_listen.setText("f9")
         cfg = dialog.result_config()
 
+        self.assertEqual(cfg["ui"]["hotkey_answer"], "f6")
+        self.assertEqual(cfg["ui"]["hotkey_clear"], "f7")
         self.assertEqual(cfg["ui"]["hotkey_talk"], "f8")
         self.assertEqual(cfg["ui"]["hotkey_listen"], "f9")
         dialog.close()
 
-    def test_talk_and_listen_hotkeys_ignore_key_repeat(self) -> None:
+    def test_single_key_hotkeys_ignore_key_repeat(self) -> None:
         from app.ui import OverlayWindow
 
         callbacks = {}
@@ -216,6 +222,12 @@ class UiRegressionTests(unittest.TestCase):
             def _toggle_running(self) -> None:
                 actions.append(("listen", threading.get_ident()))
 
+            def _ask_recent_from_hotkey(self) -> None:
+                actions.append(("ask_recent", threading.get_ident()))
+
+            def _clear(self) -> None:
+                actions.append(("clear", threading.get_ident()))
+
         with (
             patch("app.ui.Pipeline.prewarm"),
             patch("keyboard.add_hotkey", return_value=object()),
@@ -231,18 +243,24 @@ class UiRegressionTests(unittest.TestCase):
                 callbacks["b"](KeyEvent("down"))
                 callbacks["b"](KeyEvent("down"))
                 callbacks["b"](KeyEvent("up"))
+                callbacks["n"](KeyEvent("down"))
+                callbacks["n"](KeyEvent("down"))
+                callbacks["n"](KeyEvent("up"))
+                callbacks["m"](KeyEvent("down"))
+                callbacks["m"](KeyEvent("down"))
+                callbacks["m"](KeyEvent("up"))
 
             thread = threading.Thread(target=press_keys)
             thread.start()
             thread.join(timeout=1.0)
 
-            self.assertTrue(self._wait_until(lambda: len(actions) == 3))
+            self.assertTrue(self._wait_until(lambda: len(actions) == 5))
             self.assertEqual([name for name, _thread_id in actions], [
-                "talk_start", "talk_stop", "listen"
+                "talk_start", "talk_stop", "listen", "ask_recent", "clear"
             ])
             self.assertEqual(
                 [thread_id for _name, thread_id in actions],
-                [threading.get_ident()] * 3,
+                [threading.get_ident()] * 5,
             )
             with patch("app.ui.cfgmod.save_ui_position"):
                 window.close()

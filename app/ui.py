@@ -475,7 +475,8 @@ class SettingsDialog(QDialog):
         self.chk_top = QCheckBox("窗口始终置顶")
         self.chk_top.setChecked(bool(ui.get("always_on_top", True)))
         self.ed_hotkey_toggle = QLineEdit(str(ui.get("hotkey_toggle", "")))
-        self.ed_hotkey_answer = QLineEdit(str(ui.get("hotkey_answer", "")))
+        self.ed_hotkey_answer = QLineEdit(str(ui.get("hotkey_answer", "n")))
+        self.ed_hotkey_clear = QLineEdit(str(ui.get("hotkey_clear", "m")))
         self.ed_hotkey_talk = QLineEdit(str(ui.get("hotkey_talk", "space")))
         self.ed_hotkey_listen = QLineEdit(str(ui.get("hotkey_listen", "b")))
 
@@ -485,7 +486,8 @@ class SettingsDialog(QDialog):
         form.addRow("", self.chk_capture)
         form.addRow("", self.chk_top)
         form.addRow("显示/隐藏热键", self.ed_hotkey_toggle)
-        form.addRow("手动提问热键", self.ed_hotkey_answer)
+        form.addRow("问最近按键", self.ed_hotkey_answer)
+        form.addRow("清空按键", self.ed_hotkey_clear)
         form.addRow("按住说话按键", self.ed_hotkey_talk)
         form.addRow("监听开关按键", self.ed_hotkey_listen)
         return page
@@ -608,6 +610,7 @@ class SettingsDialog(QDialog):
         cfgmod.set_(self.cfg, "ui.always_on_top", self.chk_top.isChecked())
         cfgmod.set_(self.cfg, "ui.hotkey_toggle", self.ed_hotkey_toggle.text().strip())
         cfgmod.set_(self.cfg, "ui.hotkey_answer", self.ed_hotkey_answer.text().strip())
+        cfgmod.set_(self.cfg, "ui.hotkey_clear", self.ed_hotkey_clear.text().strip())
         cfgmod.set_(self.cfg, "ui.hotkey_talk", self.ed_hotkey_talk.text().strip())
         cfgmod.set_(self.cfg, "ui.hotkey_listen", self.ed_hotkey_listen.text().strip())
         return self.cfg
@@ -625,6 +628,7 @@ def parent_theme(cfg: dict) -> dict:
 class OverlayWindow(QWidget):
     _hotkey_toggle_requested = pyqtSignal()
     _hotkey_answer_requested = pyqtSignal()
+    _hotkey_clear_requested = pyqtSignal()
     _hotkey_talk_pressed = pyqtSignal()
     _hotkey_talk_released = pyqtSignal()
     _hotkey_listen_requested = pyqtSignal()
@@ -635,6 +639,7 @@ class OverlayWindow(QWidget):
         self.pipeline = Pipeline(cfg)
         self._hotkey_toggle_requested.connect(self._toggle_visible)
         self._hotkey_answer_requested.connect(self._ask_recent_from_hotkey)
+        self._hotkey_clear_requested.connect(self._clear)
         self._hotkey_talk_pressed.connect(self._start_voice_from_hotkey)
         self._hotkey_talk_released.connect(self._stop_voice_from_hotkey)
         self._hotkey_listen_requested.connect(self._toggle_running)
@@ -1179,14 +1184,25 @@ class OverlayWindow(QWidget):
                 return
             self._hotkeys.append(lambda handle=handle: keyboard.unhook(handle))
 
+        def bind_action(combo: str, action) -> None:
+            if "+" in combo:
+                bind(combo, action)
+            else:
+                bind_press_cycle(combo, action)
+
         bind(str(ui.get("hotkey_toggle") or ""), self._hotkey_toggle_requested.emit)
-        bind(str(ui.get("hotkey_answer") or ""), self._hotkey_answer_requested.emit)
+        bind_action(
+            str(ui.get("hotkey_answer") or ""), self._hotkey_answer_requested.emit
+        )
+        bind_action(
+            str(ui.get("hotkey_clear") or ""), self._hotkey_clear_requested.emit
+        )
         bind_press_cycle(
             str(ui.get("hotkey_talk") or ""),
             self._hotkey_talk_pressed.emit,
             self._hotkey_talk_released.emit,
         )
-        bind_press_cycle(
+        bind_action(
             str(ui.get("hotkey_listen") or ""), self._hotkey_listen_requested.emit
         )
 
